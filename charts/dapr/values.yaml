@@ -22,3 +22,8 @@ global:
     allowedClockSkew: 15m
   daprControlPlaneOs: linux
   labels: {}
+
+# dapr_placement:
+#   extraEnvs:
+#     - name: "TEST"
+#       value: "TEST"

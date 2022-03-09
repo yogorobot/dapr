@@ -9,6 +9,11 @@ image:
 nameOverride: ""
 fullnameOverride: ""
 
+# extraEnvs:
+#   - name: ""
+#     value: ""
+extraEnvs: []
+
 ports:
   protocol: TCP
   apiPort: 50005

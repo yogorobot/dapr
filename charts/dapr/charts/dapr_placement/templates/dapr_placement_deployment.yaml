@@ -150,6 +150,10 @@ spec:
 {{- end }}
 {{- end }}
         env:
+          {{- range $k,$v := .Values.extraEnvs }}
+          - name: {{ $v.name }}
+            value: {{ $v.value }}
+          {{- end }}
           - name: PLACEMENT_ID
             valueFrom:
               fieldRef:
