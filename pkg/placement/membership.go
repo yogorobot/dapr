@@ -307,12 +307,45 @@ func (p *Service) performTableDissemination() {
 func (p *Service) performTablesUpdate(hosts []placementGRPCStream, newTable *v1pb.PlacementTables) {
 	// TODO: error from disseminationOperation needs to be handle properly.
 	// Otherwise, each Dapr runtime will have inconsistent hashing table.
-	p.disseminateOperation(hosts, "lock", nil)
-	p.disseminateOperation(hosts, "update", newTable)
-	p.disseminateOperation(hosts, "unlock", nil)
+	startedAt := time.Now()
+
+	var wg sync.WaitGroup
+	for _, host := range hosts {
+		wg.Add(1)
+
+		timeoutC := make(chan bool)
+		stopC := make(chan bool)
+
+		go func(h placementGRPCStream) {
+			<-timeoutC
+
+			// TODO add timeout
+			select {
+			case <-time.After(10 * time.Second):
+				// timeout
+				log.Errorf("performTablesUpdate(%v) timeout !!!!!!!!!!", h)
+				return
+			case <-stopC:
+				// NOTE normal
+				return
+			}
+		}(host)
+		go func(h placementGRPCStream) {
+			defer wg.Done()
+			defer close(stopC)
+
+			timeoutC <- true
+			p.disseminateOperation([]placementGRPCStream{h}, "lock", nil)
+			p.disseminateOperation([]placementGRPCStream{h}, "update", newTable)
+			p.disseminateOperation([]placementGRPCStream{h}, "unlock", nil)
+		}(host)
+	}
+	wg.Wait()
+	log.Infof("performTablesUpdate(%v) succeed %v ================================", time.Now().Sub(startedAt))
 }
 
 func (p *Service) disseminateOperation(targets []placementGRPCStream, operation string, tables *v1pb.PlacementTables) error {
+	log.Infof("disseminateOperation starting... %v", targets)
 	o := &v1pb.PlacementOrder{
 		Operation: operation,
 		Tables:    tables,
@@ -340,9 +373,11 @@ func (p *Service) disseminateOperation(targets []placementGRPCStream, operation 
 				return nil
 			},
 			backoff,
-			func(err error, d time.Duration) { log.Debugf("Attempting to disseminate again after error: %v", err) },
-			func() { log.Debug("Dissemination successful.") })
+			func(err error, d time.Duration) { log.Infof("Attempting to disseminate again after error: %v", err) },
+			func() { log.Infof("Dissemination successful.") })
 	}
+
+	log.Infof("disseminateOperation successful. %v", targets)
 
 	return err
 }
