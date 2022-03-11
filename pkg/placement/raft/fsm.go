@@ -14,9 +14,11 @@ limitations under the License.
 package raft
 
 import (
+	"github.com/dapr/dapr/pkg/placement/hashing"
 	"io"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/raft"
 	"github.com/pkg/errors"
@@ -64,6 +66,8 @@ func (c *FSM) State() *DaprHostMemberState {
 
 // PlacementState returns the current placement tables.
 func (c *FSM) PlacementState() *v1pb.PlacementTables {
+	logging.Infof("PlacementState start")
+	t1 := time.Now()
 	c.stateLock.RLock()
 	defer c.stateLock.RUnlock()
 
@@ -78,29 +82,33 @@ func (c *FSM) PlacementState() *v1pb.PlacementTables {
 
 	entries := c.state.hashingTableMap()
 	for k, v := range entries {
-		hosts, sortedSet, loadMap, totalLoad := v.GetInternals()
-		table := v1pb.PlacementTable{
-			Hosts:     make(map[uint64]string),
-			SortedSet: make([]uint64, len(sortedSet)),
-			TotalLoad: totalLoad,
-			LoadMap:   make(map[string]*v1pb.Host),
-		}
 
-		for lk, lv := range hosts {
-			table.Hosts[lk] = lv
-		}
+		var table v1pb.PlacementTable
+		v.ReadInternals(func(hosts map[uint64]string, sortedSet []uint64, loadMap map[string]*hashing.Host, totalLoad int64) {
 
-		copy(table.SortedSet, sortedSet)
-
-		for lk, lv := range loadMap {
-			h := v1pb.Host{
-				Name: lv.Name,
-				Load: lv.Load,
-				Port: lv.Port,
-				Id:   lv.AppID,
+			table = v1pb.PlacementTable{
+				Hosts:     make(map[uint64]string),
+				SortedSet: make([]uint64, len(sortedSet)),
+				TotalLoad: totalLoad,
+				LoadMap:   make(map[string]*v1pb.Host),
 			}
-			table.LoadMap[lk] = &h
-		}
+
+			for lk, lv := range hosts {
+				table.Hosts[lk] = lv
+			}
+
+			copy(table.SortedSet, sortedSet)
+
+			for lk, lv := range loadMap {
+				h := v1pb.Host{
+					Name: lv.Name,
+					Load: lv.Load,
+					Port: lv.Port,
+					Id:   lv.AppID,
+				}
+				table.LoadMap[lk] = &h
+			}
+		})
 		newTable.Entries[k] = &table
 
 		totalHostSize += len(table.Hosts)
@@ -108,6 +116,7 @@ func (c *FSM) PlacementState() *v1pb.PlacementTables {
 		totalLoadMap += len(table.LoadMap)
 	}
 
+	logging.Infof("PlacementState DONE: %v", time.Now().Sub(t1))
 	logging.Debugf("PlacementTable Size, Hosts: %d, SortedSet: %d, LoadMap: %d", totalHostSize, totalSortedSet, totalLoadMap)
 
 	return newTable
@@ -139,6 +148,8 @@ func (c *FSM) removeMember(cmdData []byte) (bool, error) {
 
 // Apply log is invoked once a log entry is committed.
 func (c *FSM) Apply(log *raft.Log) interface{} {
+	logging.Infof("Apply raft log.")
+	t1 := time.Now()
 	var (
 		err     error
 		updated bool
@@ -164,6 +175,8 @@ func (c *FSM) Apply(log *raft.Log) interface{} {
 		return false
 	}
 
+	logging.Infof("Apply raft log DONE: %v", time.Now().Sub(t1))
+
 	return updated
 }
 
@@ -179,6 +192,8 @@ func (c *FSM) Snapshot() (raft.FSMSnapshot, error) {
 // Restore streams in the snapshot and replaces the current state store with a
 // new one based on the snapshot if all goes OK during the restore.
 func (c *FSM) Restore(old io.ReadCloser) error {
+	logging.Infof("Restore raft.")
+	t1 := time.Now()
 	defer old.Close()
 
 	members := newDaprHostMemberState()
@@ -190,5 +205,6 @@ func (c *FSM) Restore(old io.ReadCloser) error {
 	c.state = members
 	c.stateLock.Unlock()
 
+	logging.Infof("Restore raft DONE: %v", time.Now().Sub(t1))
 	return nil
 }

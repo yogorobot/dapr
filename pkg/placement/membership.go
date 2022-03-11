@@ -216,15 +216,25 @@ func (p *Service) processRaftStateCommand(stopCh chan struct{}) {
 	// of raft apply command.
 	logApplyConcurrency := make(chan struct{}, raftApplyCommandMaxConcurrency)
 
+	processingTicker := time.NewTicker(10 * time.Second)
+
 	for {
 		select {
 		case <-stopCh:
+			log.Infof("stopCh...")
 			return
 
 		case <-p.shutdownCh:
+			log.Infof("shutdown...")
 			return
 
+		case <-processingTicker.C:
+			log.Infof("nothing happened...")
+			continue
+
 		case op := <-p.membershipCh:
+			log.Infof("START processRaftStateCommand membershipCh %v", op)
+
 			switch op.cmdType {
 			case raft.MemberUpsert, raft.MemberRemove:
 				// MemberUpsert updates the state of dapr runtime host whenever
@@ -232,13 +242,18 @@ func (p *Service) processRaftStateCommand(stopCh chan struct{}) {
 				// MemberRemove will be queued by faultHostDetectTimer.
 				// Even if ApplyCommand is failed, both commands will retry
 				// until the state is consistent.
+				log.Infof("processRaftStateCommand membershipCh 0 - %v", op)
 				logApplyConcurrency <- struct{}{}
+				log.Infof("processRaftStateCommand membershipCh 1 - %v", op)
 				go func() {
 					// We lock dissemination to ensure the updates can complete before the table is disseminated.
+					log.Infof("processRaftStateCommand membershipCh 2 - %v", op)
 					p.disseminateLock.Lock()
 					defer p.disseminateLock.Unlock()
 
+					log.Infof("processRaftStateCommand membershipCh 3 - %v", op)
 					updated, raftErr := p.raftNode.ApplyCommand(op.cmdType, op.host)
+					log.Infof("processRaftStateCommand membershipCh 4 - %v %v", updated, raftErr)
 					if raftErr != nil {
 						log.Errorf("fail to apply command: %v", raftErr)
 					} else {
@@ -255,40 +270,52 @@ func (p *Service) processRaftStateCommand(stopCh chan struct{}) {
 							p.disseminateNextTime.Store(time.Now().Add(disseminateTimeout).UnixNano())
 						}
 					}
+					log.Infof("processRaftStateCommand membershipCh 5")
 					<-logApplyConcurrency
+					log.Infof("processRaftStateCommand membershipCh 6")
 				}()
+				log.Infof("DONE processRaftStateCommand membershipCh %v - %v", op.cmdType, op)
 
 			case raft.TableDisseminate:
+				log.Infof("TableDisseminate start...")
 				// TableDisseminate will be triggered by disseminateTimer.
 				// This disseminates the latest consistent hashing tables to Dapr runtime.
 				p.performTableDissemination()
+				log.Infof("TableDisseminate done...")
 			}
 		}
 	}
 }
 
 func (p *Service) performTableDissemination() {
+	log.Infof("TableDisseminate start 1...")
 	p.streamConnPoolLock.RLock()
 	nStreamConnPool := len(p.streamConnPool)
 	p.streamConnPoolLock.RUnlock()
+	log.Infof("TableDisseminate start 2...")
 	nTargetConns := len(p.raftNode.FSM().State().Members())
 
 	monitoring.RecordRuntimesCount(nStreamConnPool)
 	monitoring.RecordActorRuntimesCount(nTargetConns)
 
+	log.Infof("TableDisseminate start 3...")
 	// ignore dissemination if there is no member update.
 	if cnt := p.memberUpdateCount.Load(); cnt > 0 {
 		p.disseminateLock.Lock()
 		defer p.disseminateLock.Unlock()
 
+		log.Infof("TableDisseminate start 4... %v", cnt)
+
 		state := p.raftNode.FSM().PlacementState()
 		log.Infof(
 			"Start disseminating tables. memberUpdateCount: %d, streams: %d, targets: %d, table generation: %s",
 			cnt, nStreamConnPool, nTargetConns, state.Version)
+
 		p.streamConnPoolLock.RLock()
 		streamConnPool := make([]placementGRPCStream, len(p.streamConnPool))
 		copy(streamConnPool, p.streamConnPool)
 		p.streamConnPoolLock.RUnlock()
+
 		p.performTablesUpdate(streamConnPool, state)
 		log.Infof(
 			"Completed dissemination. memberUpdateCount: %d, streams: %d, targets: %d, table generation: %s",
@@ -313,35 +340,50 @@ func (p *Service) performTablesUpdate(hosts []placementGRPCStream, newTable *v1p
 	for _, host := range hosts {
 		wg.Add(1)
 
-		timeoutC := make(chan bool)
-		stopC := make(chan bool)
-
 		go func(h placementGRPCStream) {
+			defer wg.Done()
+
+			timeoutC := make(chan bool)
+			stopC := make(chan bool)
+			step := ""
+
+			go func() {
+				defer close(stopC)
+
+				timeoutC <- true
+				step = "lock"
+				p.disseminateOperation([]placementGRPCStream{h}, "lock", nil)
+				time.Sleep(6 * time.Second)
+				step = "update"
+				p.disseminateOperation([]placementGRPCStream{h}, "update", newTable)
+				step = "unlock"
+				p.disseminateOperation([]placementGRPCStream{h}, "unlock", nil)
+			}()
+
 			<-timeoutC
 
 			// TODO add timeout
-			select {
-			case <-time.After(10 * time.Second):
-				// timeout
-				log.Errorf("performTablesUpdate(%v) timeout !!!!!!!!!!", h)
-				return
-			case <-stopC:
-				// NOTE normal
-				return
+			t := time.NewTicker(20 * time.Second)
+			times := 0
+			for {
+				select {
+				case <-t.C:
+					// timeout
+					times++
+					log.Errorf("performTablesUpdate(%v) timeout !!!!!!!!!! %d*20s", h, times)
+					if times >= 3 {
+						log.Errorf("performTablesUpdate(%v) !!!!!!!!! 60s timeout exit !!!!!!!!!! step %v", h, step)
+						return
+					}
+				case <-stopC:
+					// NOTE normal
+					return
+				}
 			}
-		}(host)
-		go func(h placementGRPCStream) {
-			defer wg.Done()
-			defer close(stopC)
-
-			timeoutC <- true
-			p.disseminateOperation([]placementGRPCStream{h}, "lock", nil)
-			p.disseminateOperation([]placementGRPCStream{h}, "update", newTable)
-			p.disseminateOperation([]placementGRPCStream{h}, "unlock", nil)
 		}(host)
 	}
 	wg.Wait()
-	log.Infof("performTablesUpdate(%v) succeed %v ================================", time.Now().Sub(startedAt))
+	log.Infof("performTablesUpdate(%v) succeed %v ================================", hosts, time.Now().Sub(startedAt))
 }
 
 func (p *Service) disseminateOperation(targets []placementGRPCStream, operation string, tables *v1pb.PlacementTables) error {

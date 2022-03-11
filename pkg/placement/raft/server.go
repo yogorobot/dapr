@@ -260,12 +260,16 @@ func (s *Server) ApplyCommand(cmdType CommandType, data DaprHostMember) (bool, e
 		return false, err
 	}
 
+	logging.Infof("Raft Apply Command START: %v %v", cmdLog, commandTimeout)
 	future := s.raft.Apply(cmdLog, commandTimeout)
 	if err := future.Error(); err != nil {
+		logging.Infof("Raft Apply Command 1: %v %v", cmdLog, commandTimeout)
 		return false, err
 	}
 
+	logging.Infof("Raft Apply Command 2: %v %v", cmdLog, commandTimeout)
 	resp := future.Response()
+	logging.Infof("Raft Apply Command DONE: %v %v", cmdLog, commandTimeout)
 	return resp.(bool), nil
 }
 

@@ -351,6 +351,7 @@ func (p *ActorPlacement) establishStreamConn() (v1pb.Placement_ReportDaprStatusC
 			// With round robin load balancer, Dapr can find the leader automatically.
 			opts = append(opts, grpc.WithDefaultServiceConfig(grpcServiceConfig))
 		}
+		opts = append(opts, grpc.WithDefaultServiceConfig(grpcServiceConfig))
 
 		conn, err := grpc.Dial(serverAddr, opts...)
 	NEXT_SERVER:
