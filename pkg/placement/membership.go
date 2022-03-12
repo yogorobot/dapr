@@ -208,6 +208,8 @@ func (p *Service) processRaftStateCommand(stopCh chan struct{}) {
 	// of raft apply command.
 	logApplyConcurrency := make(chan struct{}, raftApplyCommandMaxConcurrency)
 
+	processingTicker := time.NewTicker(10 * time.Second)
+
 	for {
 		select {
 		case <-stopCh:
@@ -215,6 +217,10 @@ func (p *Service) processRaftStateCommand(stopCh chan struct{}) {
 
 		case <-p.shutdownCh:
 			return
+
+		case <-processingTicker.C:
+			log.Infof("process raft state command: nothing happened...")
+			continue
 
 		case op := <-p.membershipCh:
 			switch op.cmdType {
@@ -299,9 +305,56 @@ func (p *Service) performTableDissemination() {
 func (p *Service) performTablesUpdate(hosts []placementGRPCStream, newTable *v1pb.PlacementTables) {
 	// TODO: error from disseminationOperation needs to be handle properly.
 	// Otherwise, each Dapr runtime will have inconsistent hashing table.
-	p.disseminateOperation(hosts, "lock", nil)
-	p.disseminateOperation(hosts, "update", newTable)
-	p.disseminateOperation(hosts, "unlock", nil)
+
+	startedAt := time.Now()
+
+	var wg sync.WaitGroup
+	for _, host := range hosts {
+		wg.Add(1)
+
+		go func(h placementGRPCStream) {
+			defer wg.Done()
+
+			timeoutC := make(chan bool)
+			stopC := make(chan bool)
+			step := ""
+			isTimeout := false
+
+			go func() {
+				defer close(stopC)
+
+				timeoutC <- true
+				step = "lock"
+				p.disseminateOperation([]placementGRPCStream{h}, "lock", nil)
+				if isTimeout {
+					return
+				}
+				step = "update"
+				p.disseminateOperation([]placementGRPCStream{h}, "update", newTable)
+				if isTimeout {
+					return
+				}
+				step = "unlock"
+				p.disseminateOperation([]placementGRPCStream{h}, "unlock", nil)
+			}()
+
+			<-timeoutC
+
+			select {
+			case <-time.After(10 * time.Second):
+				// timeout
+				isTimeout = true
+				log.Errorf("performTablesUpdate(%v) timeout 10s !!!", h)
+				return
+			case <-stopC:
+				// NOTE normal
+				return
+			}
+		}(host)
+	}
+	wg.Wait()
+
+	log.Debugf("performTablesUpdate succeed %v", time.Now().Sub(startedAt))
 }
 
 func (p *Service) disseminateOperation(targets []placementGRPCStream, operation string, tables *v1pb.PlacementTables) error {
@@ -322,8 +375,8 @@ func (p *Service) disseminateOperation(targets []placementGRPCStream, operation 
 				// Check stream in stream pool, if stream is not available, skip to next.
 				if !p.hasStreamConn(s) {
 					remoteAddr := "n/a"
-					if peer, ok := peer.FromContext(s.Context()); ok {
-						remoteAddr = peer.Addr.String()
+					if _peer, ok := peer.FromContext(s.Context()); ok {
+						remoteAddr = _peer.Addr.String()
 					}
 					log.Debugf("runtime host (%q) is disconnected with server. go with next dissemination (operation: %s).", remoteAddr, operation)
 					return nil
@@ -333,8 +386,8 @@ func (p *Service) disseminateOperation(targets []placementGRPCStream, operation 
 
 				if err != nil {
 					remoteAddr := "n/a"
-					if peer, ok := peer.FromContext(s.Context()); ok {
-						remoteAddr = peer.Addr.String()
+					if _peer, ok := peer.FromContext(s.Context()); ok {
+						remoteAddr = _peer.Addr.String()
 					}
 					log.Errorf("error updating runtime host (%q) on %q operation: %s", remoteAddr, operation, err)
 					return err
