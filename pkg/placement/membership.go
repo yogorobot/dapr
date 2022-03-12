@@ -346,6 +346,7 @@ func (p *Service) performTablesUpdate(hosts []placementGRPCStream, newTable *v1p
 			timeoutC := make(chan bool)
 			stopC := make(chan bool)
 			step := ""
+			isTimeout := false
 
 			go func() {
 				defer close(stopC)
@@ -353,9 +354,14 @@ func (p *Service) performTablesUpdate(hosts []placementGRPCStream, newTable *v1p
 				timeoutC <- true
 				step = "lock"
 				p.disseminateOperation([]placementGRPCStream{h}, "lock", nil)
-				time.Sleep(6 * time.Second)
+				if isTimeout {
+					return
+				}
 				step = "update"
 				p.disseminateOperation([]placementGRPCStream{h}, "update", newTable)
+				if isTimeout {
+					return
+				}
 				step = "unlock"
 				p.disseminateOperation([]placementGRPCStream{h}, "unlock", nil)
 			}()
@@ -363,22 +369,15 @@ func (p *Service) performTablesUpdate(hosts []placementGRPCStream, newTable *v1p
 			<-timeoutC
 
 			// TODO add timeout
-			t := time.NewTicker(20 * time.Second)
-			times := 0
-			for {
-				select {
-				case <-t.C:
-					// timeout
-					times++
-					log.Errorf("performTablesUpdate(%v) timeout !!!!!!!!!! %d*20s", h, times)
-					if times >= 3 {
-						log.Errorf("performTablesUpdate(%v) !!!!!!!!! 60s timeout exit !!!!!!!!!! step %v", h, step)
-						return
-					}
-				case <-stopC:
-					// NOTE normal
-					return
-				}
+			select {
+			case <-time.After(10 * time.Second):
+				// timeout
+				isTimeout = true
+				log.Errorf("performTablesUpdate(%v) timeout !!!!!!!!!! 10s", h)
+				return
+			case <-stopC:
+				// NOTE normal
+				return
 			}
 		}(host)
 	}
@@ -401,6 +400,16 @@ func (p *Service) disseminateOperation(targets []placementGRPCStream, operation 
 
 		retry.NotifyRecover(
 			func() error {
+				// Check stream in stream pool, if stream is not available, skip to next.
+				if !p.hasStreamConn(s) {
+					remoteAddr := "n/a"
+					if _peer, ok := peer.FromContext(s.Context()); ok {
+						remoteAddr = _peer.Addr.String()
+					}
+					log.Debugf("runtime host (%q) is disconnected with server. go with next dissemination (operation: %s).", remoteAddr, operation)
+					return nil
+				}
+
 				err = s.Send(o)
 
 				if err != nil {

@@ -70,6 +70,7 @@ func (c *FSM) PlacementState() *v1pb.PlacementTables {
 	t1 := time.Now()
 	c.stateLock.RLock()
 	defer c.stateLock.RUnlock()
+	logging.Infof("PlacementState start - 1 -> #%v", c.state.data.TableGeneration)
 
 	newTable := &v1pb.PlacementTables{
 		Version: strconv.FormatUint(c.state.TableGeneration(), 10),
@@ -81,6 +82,7 @@ func (c *FSM) PlacementState() *v1pb.PlacementTables {
 	totalLoadMap := 0
 
 	entries := c.state.hashingTableMap()
+	logging.Infof("PlacementState start - 2 -> #%v | %v", c.state.data.TableGeneration, len(entries))
 	for k, v := range entries {
 
 		var table v1pb.PlacementTable
@@ -115,7 +117,6 @@ func (c *FSM) PlacementState() *v1pb.PlacementTables {
 		totalSortedSet += len(table.SortedSet)
 		totalLoadMap += len(table.LoadMap)
 	}
-
 	logging.Infof("PlacementState DONE: %v", time.Now().Sub(t1))
 	logging.Debugf("PlacementTable Size, Hosts: %d, SortedSet: %d, LoadMap: %d", totalHostSize, totalSortedSet, totalLoadMap)
 
